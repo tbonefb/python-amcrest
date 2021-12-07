@@ -239,6 +239,24 @@ class Video(Http):
             f"&VideoInOptions[{channel}].{field}={value}"
         )
         return ret.content.decode()
+		
+    def set_mode_day(self) -> str:
+        # self.set_video_in_option('Profile', 3, 'Night')
+        return self.set_video_in_option(
+            param="SwitchMode", value=str(0), profile="Night"
+        )
+
+    def set_mode_night(self) -> str:
+        # self.set_video_in_option('Profile', 3, 'Night')
+        return self.set_video_in_option(
+            param="SwitchMode", value=str(3), profile="Night"
+        )
+
+    def set_mode_normal(self) -> str:
+        # self.set_video_in_option('Profile', 3, 'Night')
+        return self.set_video_in_option(
+            param="SwitchMode", value=str(3), profile="Night"
+        )
 
     @property
     def day_night_color(self) -> int:
