@@ -107,3 +107,4 @@ ENV/
 
 # Vim temporary files
 *.swp
+.DS_Store
