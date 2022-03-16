@@ -28,7 +28,7 @@ from .config import (
     MAX_RETRY_HTTP_CONNECTION,
     TIMEOUT_HTTP_PROTOCOL,
 )
-from .exceptions import CommError, LoginError
+from .exceptions import CommError, LoginError, ReadTimeoutError
 from .utils import clean_url, pretty
 
 _LOGGER = logging.getLogger(__name__)
@@ -335,7 +335,7 @@ class Http:
             follow_redirects=True,
             auth=self._async_token,
             verify=self._verify,
-            timeout=httpx_timeout
+            timeout=httpx_timeout,
         ) as client:
             for loop in range(1, 2 + retries):
                 _LOGGER.debug(
@@ -350,7 +350,7 @@ class Http:
                         self._async_token = None
                         raise LoginError()
                     resp.raise_for_status()
-                except httpx.RequestError as error:
+                except httpx.HTTPError as error:
                     _LOGGER.debug(
                         "%s Query %i failed due to error: %r",
                         self,
@@ -399,10 +399,10 @@ class Http:
             follow_redirects=True,
             auth=self._async_token,
             verify=self._verify,
-            timeout=httpx_timeout
+            timeout=httpx_timeout,
         ) as client:
-            async with client.stream("GET", url) as resp:
-                try:
+            try:
+                async with client.stream("GET", url) as resp:
                     if resp.status_code == 401:
                         _LOGGER.debug(
                             "%s Query %i: Unauthorized (401)", self, cmd_id
@@ -418,13 +418,16 @@ class Http:
                         resp.status_code,
                     )
                     yield resp
-                except httpx.RequestError as error:
-                    _LOGGER.debug(
-                        "%s Query %i failed due to error: %r",
-                        self,
-                        cmd_id,
-                        error,
-                    )
+            except httpx.HTTPError as error:
+                _LOGGER.debug(
+                    "%s Query %i failed due to error: %r",
+                    self,
+                    cmd_id,
+                    error,
+                )
+                if isinstance(error, httpx.ReadTimeout):
+                    raise ReadTimeoutError(error) from error
+                else:
                     raise CommError(error) from error
 
     def command_audio(

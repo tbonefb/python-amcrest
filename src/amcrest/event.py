@@ -8,6 +8,7 @@
 # GNU General Public License for more details.
 #
 # vim:sw=4:ts=4:et
+import json
 import logging
 import re
 from typing import (
@@ -25,15 +26,12 @@ from typing import (
 from requests import RequestException
 from urllib3.exceptions import HTTPError
 
-from .exceptions import CommError
+from .exceptions import CommError, ReadTimeoutError
 from .http import Http, TimeoutT
 from .utils import pretty
 
 _LOGGER = logging.getLogger(__name__)
 _REG_PARSE_KEY_VALUE = re.compile(r"(?P<key>.+?)(?:=)(?P<value>.+?)(?:;|$)")
-_REG_PARSE_MALFORMED_JSON = re.compile(
-    r'(?P<key>"[^"\\]*(?:\\.[^"\\]*)*"|[^\s"]+)\s:\s(?P<value>"[^"\\]*(?:\\.[^"\\]*)*"|[^\s"]+)'
-)
 
 
 def _event_lines(ret: Iterable[str]) -> Iterator[str]:
@@ -52,6 +50,15 @@ async def _async_event_lines(ret: AsyncIterable[str]) -> AsyncIterator[str]:
         if line[-2:] == ["\r", "\n"]:
             yield "".join(line).strip()
             line.clear()
+
+
+async def _async_event_info(ret: AsyncIterable[str], length: int) -> str:
+    line = []
+    async for char in ret:
+        line.append(char)
+        if len(line) == length:
+            return "".join(line)
+    raise CommError()
 
 
 class Event(Http):
@@ -304,7 +311,10 @@ class Event(Http):
         try:
             for line in _event_lines(ret.iter_content(decode_unicode=True)):
                 if line.lower().startswith("content-length:"):
-                    chunk_size = int(line.split(":")[1])
+                    # There tends to be a leading \r\n, so add 2 to the length.
+                    # If this is not present, there is a trailing \r\n\r\n at
+                    # the end that will just be stripped out
+                    chunk_size = int(line.split(":")[1]) + 2
                     try:
                         yield next(
                             ret.iter_content(
@@ -323,31 +333,23 @@ class Event(Http):
         self, eventcodes: str, *, timeout_cmd: TimeoutT = None
     ) -> AsyncIterator[str]:
         """Return a stream of event info lines."""
-        # If timeout is not specified, then use default, but remove read
-        # timeout since there's no telling when, if ever, an event will come.
-        if timeout_cmd is None:
-            if isinstance(self._timeout_default, tuple):
-                timeout_cmd = self._timeout_default[0], None
-            else:
-                timeout_cmd = self._timeout_default, None
-
-        async with self.async_stream_command(
-            f"eventManager.cgi?action=attach&codes=[{eventcodes}]",
-            timeout_cmd=timeout_cmd,
-        ) as ret:
-            it = ret.aiter_text(chunk_size=1)
-            async for line in _async_event_lines(it):
-                if line.lower().startswith("content-length:"):
-                    chunk_size = int(line.split(":")[1])
-                    chars = []
-                    async for char in it:
-                        chars.append(char)
-                        if len(chars) == chunk_size:
-                            break
-                    else:
-                        # If we can't get the chunk, then return out
-                        return
-                    yield "".join(chars)
+        while True:
+            try:
+                async with self.async_stream_command(
+                    f"eventManager.cgi?action=attach&codes=[{eventcodes}]",
+                    timeout_cmd=timeout_cmd,
+                ) as ret:
+                    it = ret.aiter_text(chunk_size=1)
+                    async for line in _async_event_lines(it):
+                        if line.lower().startswith("content-length:"):
+                            # There tends to be a leading \r\n, so add 2 to the
+                            # length.  If this is not present, there is a
+                            # trailing \r\n\r\n at the end that will just be
+                            # stripped out
+                            chunk_size = int(line.split(":")[1]) + 2
+                            yield await _async_event_info(it, chunk_size)
+            except ReadTimeoutError:
+                continue
 
     def event_actions(
         self,
@@ -379,12 +381,10 @@ class Event(Http):
             event_info.strip().replace("\n", "")
         ):
             if key == "data":
-                value = {
-                    data_key.replace('"', ""): data_value.replace('"', "")
-                    for data_key, data_value in _REG_PARSE_MALFORMED_JSON.findall(
-                        value
-                    )
-                }
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    pass
             payload[key] = value
         _LOGGER.debug(
             "%s generate new event, code: %s , payload: %s",
